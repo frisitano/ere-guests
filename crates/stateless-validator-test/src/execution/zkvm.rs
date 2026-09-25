@@ -18,14 +18,33 @@ use crate::{
     registry::{ArtifactRegistry, StatelessValidatorArtifact},
 };
 
-/// Guest ELF paired with its published program VK.
+/// Guest ELF paired with its published program VK, if it has one.
 #[derive(Clone, Debug)]
 pub struct Guest {
     elf: Elf,
-    vk: Vec<u8>,
+    vk: Option<Vec<u8>>,
 }
 
-/// Resolves and caches a guest exclusively from `artifact-registry.json`.
+/// Environment variable naming a local guest ELF to test instead of the registered one, for
+/// example one just linked by ere's toolchain. `GUEST_VK` optionally names its expected program VK.
+pub const GUEST_ELF: &str = "GUEST_ELF";
+/// Environment variable naming the expected program VK of the `GUEST_ELF` guest.
+pub const GUEST_VK: &str = "GUEST_VK";
+
+/// Returns the local guest named by `GUEST_ELF` (and `GUEST_VK`), if it is set.
+pub fn local_guest() -> Option<Guest> {
+    let read = |var: &str| {
+        let path = std::env::var(var).ok()?;
+        Some(std::fs::read(&path).unwrap_or_else(|error| panic!("reading {var}={path}: {error}")))
+    };
+    Some(Guest {
+        elf: Elf(read(GUEST_ELF)?),
+        vk: read(GUEST_VK),
+    })
+}
+
+/// Resolves and caches a guest from `GUEST_ELF` if it is set, otherwise from
+/// `artifact-registry.json`.
 pub fn resolve_guest(
     stateless_validator_kind: StatelessValidatorKind,
     zkvm_kind: zkVMKind,
@@ -35,7 +54,9 @@ pub fn resolve_guest(
 
     GUEST
         .entry((stateless_validator_kind, zkvm_kind))
-        .or_insert_with(|| download_guest(stateless_validator_kind, zkvm_kind))
+        .or_insert_with(|| {
+            local_guest().unwrap_or_else(|| download_guest(stateless_validator_kind, zkvm_kind))
+        })
         .clone()
 }
 
@@ -108,7 +129,7 @@ pub fn download_guest(
     let artifact = registry_artifact(stateless_validator_kind, zkvm_kind);
     Guest {
         elf: Elf(download_artifact(&artifact.elf_url, &artifact.elf_sha256)),
-        vk: download_artifact(&artifact.vk_url, &artifact.vk_sha256),
+        vk: Some(download_artifact(&artifact.vk_url, &artifact.vk_sha256)),
     }
 }
 
@@ -137,11 +158,13 @@ pub fn run_zkvm_execution(
 ) -> Vec<ExecutionFailure> {
     let guest = resolve_guest(stateless_validator_kind, zkvm_kind);
     let zkvm = init_zkvm(zkvm_kind, guest.elf);
-    assert_eq!(
-        const_hex::encode_prefixed(zkvm.program_vk()),
-        const_hex::encode_prefixed(&guest.vk),
-        "regenerated program VK differs from the published one"
-    );
+    if let Some(vk) = &guest.vk {
+        assert_eq!(
+            const_hex::encode_prefixed(zkvm.program_vk()),
+            const_hex::encode_prefixed(vk),
+            "regenerated program VK differs from the published one"
+        );
+    }
     run_execution(fixtures, &|input| {
         Ok(zkvm.execute(&Input::new().with_stdin(input))?.0.to_vec())
     })

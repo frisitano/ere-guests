@@ -1,6 +1,7 @@
 //! `tests-zkevm@v0.8.4` execution tests for release-backed guests.
 //!
-//! Set `STATELESS_VALIDATOR` and `ZKVM` to one pair from `artifact-registry.json`.
+//! Set `STATELESS_VALIDATOR` and `ZKVM` to one pair from `artifact-registry.json`, or set
+//! `GUEST_ELF` (and optionally `GUEST_VK`) to test a local ELF of that guest for that zkVM.
 //! Run with `ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere` to use pre-built Ere images.
 
 use ere_dockerized::zkVMKind;
@@ -8,7 +9,7 @@ use stateless_validator_catalog::StatelessValidatorKind;
 use stateless_validator_test::{
     execution::{
         ExecutionFailures, init_tracing,
-        zkvm::{is_guest_compatible, run_zkvm_execution},
+        zkvm::{is_guest_compatible, local_guest, run_zkvm_execution},
     },
     fixture::{StatelessValidatorFixture, devnet_preset_fixtures, eest_fixtures},
 };
@@ -46,8 +47,9 @@ fn registered_pair() -> (StatelessValidatorKind, zkVMKind) {
         .expect("ZKVM must name an artifact-registry.json zkVM")
         .parse::<zkVMKind>()
         .unwrap();
+    // A local ELF is built for the SDK of the Ere version under test, not a registered release.
     assert!(
-        is_guest_compatible(stateless_validator, zkvm),
+        local_guest().is_some() || is_guest_compatible(stateless_validator, zkvm),
         "{stateless_validator}-{zkvm} is incompatible with Ere SDK {}",
         zkvm.sdk_version()
     );
