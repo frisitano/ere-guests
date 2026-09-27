@@ -155,19 +155,21 @@ jobs:
         with:
           repository: ${{ inputs.ere-guests-repository }}
           ref: ${{ inputs.ere-guests-ref }}
+          path: ere-guests
 
       # The harness runs the ELF through Ere's server images, so it uses the Ere revision the SDKs
-      # come from rather than the one this repository pins.
+      # come from rather than the one ere-guests pins. Ere goes next to ere-guests, not inside it:
+      # inside, Cargo resolves Ere's crates against the wrong workspace.
       - name: Checkout Ere at the SDK release
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.sdk-repository }}
           ref: ${{ inputs.sdk-release }}
-          path: .ere
+          path: ere
 
       - name: Free up disk space
         if: matrix.zkvm == 'zisk'
-        run: bash .github/scripts/free-up-disk-space.sh
+        run: bash ere-guests/.github/scripts/free-up-disk-space.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -179,6 +181,8 @@ jobs:
           path: elf
 
       - name: Test zkVM execution
+        working-directory: ere-guests
+        shell: bash
         env:
           STATELESS_VALIDATOR: ${{ inputs.test-stateless-validator }}
           ZKVM: ${{ matrix.zkvm }}
@@ -186,9 +190,13 @@ jobs:
           ERE_IMAGE_REGISTRY: ghcr.io/eth-act/ere
           ERE_IMAGE_TAG: ${{ inputs.ere-image-tag }}
         run: |
-          cargo test --release --package stateless-validator-test --test zkvm_execution \
-            --config "patch.'https://github.com/eth-act/ere'.ere-dockerized.path='.ere/crates/dockerized'" \
-            --config "patch.'https://github.com/eth-act/ere'.ere-catalog.path='.ere/crates/catalog'" \
+          patch=(
+            --config "patch.'https://github.com/eth-act/ere'.ere-dockerized.path='../ere/crates/dockerized'"
+            --config "patch.'https://github.com/eth-act/ere'.ere-catalog.path='../ere/crates/catalog'"
+          )
+          # Without this, the lockfile keeps the pinned Ere and Cargo ignores the patch.
+          cargo update "${patch[@]}" -p ere-dockerized -p ere-catalog
+          cargo test --release "${patch[@]}" --package stateless-validator-test --test zkvm_execution \
             -- --test-threads=1
 
   package:
