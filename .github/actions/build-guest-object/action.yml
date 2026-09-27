@@ -1,0 +1,74 @@
+name: Build zkVM guest object
+description: >
+  Builds a Rust `staticlib` guest crate into a zkVM-agnostic guest object: an archive of LLVM
+  bitcode that defines `main` and leaves only the zkVM guest ABI undefined, ready for the
+  `link-guest` workflow. It uses the nightly and the generic `riscv64ima-unknown-zkvm-elf` target
+  from the same Ere SDK release the link uses, so the bitcode is never newer than the linker.
+
+inputs:
+  crate:
+    description: Directory of the guest crate (library target `crate-type = ["staticlib"]`).
+    required: true
+  sdk-release:
+    description: Ere release holding the SDKs and link tools, e.g. `sdk-dev-1`.
+    required: true
+  sdk-repository:
+    description: Repository of that release.
+    required: false
+    default: eth-act/ere
+  features:
+    description: Cargo features to enable, comma-separated.
+    required: false
+    default: ""
+  output:
+    description: Where to write the guest object.
+    required: false
+    default: libguest.a
+
+outputs:
+  path:
+    description: Path of the guest object.
+    value: ${{ inputs.output }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download the link tools
+      shell: bash
+      env:
+        BASE: https://github.com/${{ inputs.sdk-repository }}/releases/download/${{ inputs.sdk-release }}
+        TOOLS: ${{ runner.temp }}/ere-link-tools
+      run: |
+        cd "$RUNNER_TEMP"
+        curl -fsSL -o SHA256SUMS "$BASE/SHA256SUMS"
+        curl -fsSL -o ere-link-tools.tar.gz "$BASE/ere-link-tools.tar.gz"
+        grep -E " ere-link-tools\.tar\.gz$" SHA256SUMS | sha256sum -c -
+        tar -xzf ere-link-tools.tar.gz
+        echo "RUST_TOOLCHAIN=$(cat "$TOOLS/rust-toolchain")" >> "$GITHUB_ENV"
+
+    - name: Install the pinned nightly
+      shell: bash
+      run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rust-src
+
+    - name: Build the guest object
+      shell: bash
+      working-directory: ${{ inputs.crate }}
+      env:
+        TARGET: ${{ runner.temp }}/ere-link-tools/riscv64ima-unknown-zkvm-elf.json
+        CARGO_TARGET_DIR: ${{ runner.temp }}/guest-object-target
+        RUSTFLAGS: -Clinker-plugin-lto -Cpasses=lower-atomic --cfg getrandom_backend="custom"
+        FEATURES: ${{ inputs.features }}
+        OUTPUT: ${{ inputs.output }}
+      run: |
+        cargo "+$RUST_TOOLCHAIN" build --release \
+          -Zbuild-std=std,panic_abort -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec \
+          --target "$TARGET" \
+          --config 'profile.release.lto="fat"' --config profile.release.codegen-units=1 \
+          --config 'profile.release.panic="abort"' \
+          ${FEATURES:+--features "$FEATURES"}
+        name=$(cargo "+$RUST_TOOLCHAIN" metadata --no-deps --format-version 1 |
+          jq -r '.packages[0].name | gsub("-"; "_")')
+        output="$OUTPUT"
+        [[ $output = /* ]] || output="$GITHUB_WORKSPACE/$output"
+        cp "$CARGO_TARGET_DIR/riscv64ima-unknown-zkvm-elf/release/lib$name.a" "$output"
+        ls -l "$output"
