@@ -16,6 +16,7 @@
 #         sdk-release: sdk-dev-1
 #         test-stateless-validator: ethrex
 #         lto-args: '{"zisk": "--inline-threshold=4749 --unroll-threshold=378"}'
+#         software: '{"zisk": "zkvm_u256_*"}'   # optional: these accelerators in plain RISC-V
 #         package: true
 name: Link guest
 
@@ -46,6 +47,14 @@ on:
         description: >
           JSON object mapping a zkVM to space-separated LLVM options for this guest on it (tuning
           such as `--inline-threshold=4749`), passed to the link as `-mllvm`.
+        type: string
+        default: "{}"
+      software:
+        description: >
+          JSON object mapping a zkVM to comma-separated accelerators to link in plain RISC-V from
+          the SDK's software archive instead of the vendor's (a symbol, or a prefix ending in `*`:
+          `{"zisk": "zkvm_u256_*"}`, or `zkvm_*` for all), to measure what they are worth. By
+          default every accelerator is linked accelerated.
         type: string
         default: "{}"
       ere-image-tag:
@@ -122,6 +131,7 @@ jobs:
       - name: Link
         env:
           LTO_ARGS: ${{ fromJson(inputs.lto-args)[matrix.zkvm] }}
+          SOFTWARE: ${{ fromJson(inputs.software)[matrix.zkvm] }}
         run: |
           objects=(guest-object/*.a)
           [[ ${#objects[@]} == 1 && -f ${objects[0]} ]] || {
@@ -130,7 +140,7 @@ jobs:
           }
           mkdir -p out
           read -ra lto_args <<<"$LTO_ARGS"
-          ere-link-tools/link.sh "sdk-${{ matrix.zkvm }}" "${objects[0]}" \
+          ere-link-tools/link.sh ${SOFTWARE:+--software "$SOFTWARE"} "sdk-${{ matrix.zkvm }}" "${objects[0]}" \
             "out/${{ inputs.name }}-${{ matrix.zkvm }}.elf" ${lto_args[@]+"${lto_args[@]}"}
           ls -l out
 
