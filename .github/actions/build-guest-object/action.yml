@@ -1,0 +1,74 @@
+name: Build zkVM guest object
+description: >
+  Builds a Rust `staticlib` guest crate into a zkVM-agnostic guest object: an archive of LLVM
+  bitcode that defines `main` and leaves only the zkVM guest ABI undefined, ready for the
+  `link-guest` workflow. It uses the stable toolchain pinned in `zkvm/rust-toolchain` and a guest
+  target from `zkvm/targets`: `riscv64im-unknown-none-elf` for a `no_std` guest (the default), or
+  `riscv64im-unknown-zkvm-elf` for a guest that uses `std`. The guest's runtime is
+  `zkvm/platform` (`ere-platform-zkvm`).
+
+inputs:
+  crate:
+    description: Directory of the guest crate (library target `crate-type = ["staticlib"]`).
+    required: true
+  std:
+    description: Build for the `std` target instead of the bare-metal `no_std` one.
+    required: false
+    default: "false"
+  features:
+    description: Cargo features to enable, comma-separated.
+    required: false
+    default: ""
+  output:
+    description: Where to write the guest object.
+    required: false
+    default: libguest.a
+
+outputs:
+  path:
+    description: Path of the guest object.
+    value: ${{ inputs.output }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned toolchain
+      shell: bash
+      env:
+        ZKVM: ${{ github.action_path }}/../../../zkvm
+      run: |
+        toolchain=$(cat "$ZKVM/rust-toolchain")
+        rustup toolchain install "$toolchain" --profile minimal --component rust-src
+        echo "RUST_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+
+    - name: Build the guest object
+      shell: bash
+      working-directory: ${{ inputs.crate }}
+      env:
+        ZKVM: ${{ github.action_path }}/../../../zkvm
+        STD: ${{ inputs.std }}
+        CARGO_TARGET_DIR: ${{ runner.temp }}/guest-object-target
+        # The toolchain is stable; the Tier 3 target needs `-Zbuild-std` and a JSON spec.
+        RUSTC_BOOTSTRAP: "1"
+        FEATURES: ${{ inputs.features }}
+        OUTPUT: ${{ inputs.output }}
+      run: |
+        if [[ $STD == true ]]; then
+          target=riscv64im-unknown-zkvm-elf build_std=std,panic_abort
+          export RUSTFLAGS='-Clinker-plugin-lto -Cpasses=lower-atomic --cfg getrandom_backend="custom"'
+        else
+          target=riscv64im-unknown-none-elf build_std=core,alloc
+          export RUSTFLAGS='-Clinker-plugin-lto -Cpasses=lower-atomic'
+        fi
+        cargo "+$RUST_TOOLCHAIN" build --release \
+          -Zbuild-std="$build_std" -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec \
+          --target "$ZKVM/targets/$target.json" \
+          --config 'profile.release.lto="fat"' --config profile.release.codegen-units=1 \
+          --config 'profile.release.panic="abort"' \
+          ${FEATURES:+--features "$FEATURES"}
+        name=$(cargo "+$RUST_TOOLCHAIN" metadata --no-deps --format-version 1 |
+          jq -r '.packages[0].name | gsub("-"; "_")')
+        output="$OUTPUT"
+        [[ $output = /* ]] || output="$GITHUB_WORKSPACE/$output"
+        cp "$CARGO_TARGET_DIR/$target/release/lib$name.a" "$output"
+        ls -l "$output"

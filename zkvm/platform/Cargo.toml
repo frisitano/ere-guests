@@ -1,0 +1,16 @@
+[package]
+name = "ere-platform-zkvm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Runtime and ere Platform for guests that name no zkVM and link against a zkVM SDK"
+
+# Guest-only: built for a zkVM guest target, not as part of the host workspace.
+[workspace]
+
+[dependencies]
+ere-platform-core = { git = "https://github.com/eth-act/ere", tag = "v0.17.0" }
+
+# getrandom 0.2 rejects `target_os = "zkvm"` unless a custom backend is registered.
+[target.'cfg(target_os = "zkvm")'.dependencies]
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
