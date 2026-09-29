@@ -67,10 +67,13 @@ RUSTC_BOOTSTRAP=1 RUSTFLAGS='-Clinker-plugin-lto -Cpasses=lower-atomic' \
 LD_LLD=ld.lld zkvm/link.sh <sdk> <guest.a> <guest.elf> [llvm-option...]
 ```
 
-`link.sh` rejects a guest object that does not define `main`, defines an ABI symbol, or needs a
-symbol outside the ABI. If the SDK has a `zkvm.features` file, it appends its features to every
-function's `target-features` attribute in the guest's bitcode, so the zkVM's extensions are used
-without a per-zkVM build. It then runs one fixed command,
+`link.sh` rejects a guest object that does not define `main` or needs a symbol outside the ABI. A
+guest may define an ABI symbol, such as its own `zkvm_keccak256`: the link warns, and the guest's
+definition replaces the SDK's, which stays in use only inside the vendor's own code.
+
+If the SDK has a `zkvm.features` file, `link.sh` appends its features to every function's
+`target-features` attribute in the guest's bitcode, so the zkVM's extensions are used without a
+per-zkVM build. It then runs one fixed command,
 `ld.lld -T <sdk>/zkvm.ld -L <sdk> --gc-sections --fat-lto-objects --lto-O3`, loading the SDK's
 `zkvm-lto-plugin.so` if it has one. Options after the output reach LTO as `-mllvm`: this guest's
 tuning on this zkVM, and for SP1 the scheduling direction `cargo prove build` uses for every guest

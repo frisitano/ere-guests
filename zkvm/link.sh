@@ -2,11 +2,12 @@
 # Links a guest object against a zkVM SDK, after checking the guest object against the ABI.
 #
 # The guest object is a static archive of LLVM bitcode (plus native compiler builtins) that defines
-# `main`. It must define no symbol of the guest ABI in `abi.txt`, and leave nothing undefined that
-# is not in it; otherwise the link could silently take a guest definition over the vendor's, or
-# depend on one vendor's internals. If the SDK has a `zkvm.features` file, its ISA extensions are
-# then added to the guest's code (below). The link is the one fixed command, so the ELF depends
-# only on the guest object, the SDK and the linker.
+# `main`. It must leave nothing undefined that is not in the guest ABI (`abi.txt`), or it would
+# depend on one vendor's internals. It may define an ABI symbol, such as its own `zkvm_keccak256`:
+# that definition replaces the SDK's, with a warning, and the SDK's copy stays in use only inside
+# the vendor's own code. If the SDK has a `zkvm.features` file, its ISA extensions are then added to
+# the guest's code (below). The link is the one fixed command, so the ELF depends only on the guest
+# object, the SDK and the linker.
 #
 # The SDK's `libzkvm.a` holds fat LTO objects, and the link reads their bitcode
 # (`--fat-lto-objects`), so guest and SDK are optimized as one module. If the SDK carries an LLVM
@@ -37,10 +38,7 @@ undefined=$(comm -23 \
     <("$LLVM_BIN/llvm-nm" --defined-only "$guest" 2>/dev/null | awk 'NF >= 2 {print $NF}' | sort -u))
 
 grep -qx main <<<"$defined" || { echo "$guest: does not define main" >&2; exit 1; }
-if clash=$(comm -12 <(echo "$abi") <(echo "$defined")) && [[ -n $clash ]]; then
-    echo "$guest: defines guest ABI symbols:" $clash >&2
-    exit 1
-fi
+clash=$(comm -12 <(echo "$abi") <(echo "$defined"))
 if extra=$(comm -13 <(echo "$abi") <(echo "$undefined")) && [[ -n $extra ]]; then
     echo "$guest: needs symbols outside the guest ABI:" $extra >&2
     exit 1
@@ -48,6 +46,35 @@ fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/zkvm-link.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+
+is_bitcode() { [[ $(head -c 4 "$1" | xxd -p) == 4243c0de ]]; }
+
+# ABI symbols the guest defines replace the SDK's. The SDK's copies are made internal, in a copy of
+# the SDK, so that the guest's are the only ones the link sees: in a fat LTO object's bitcode, which
+# the link reads, with `opt`, and in any other native member with `llvm-objcopy`.
+if [[ -n $clash ]]; then
+    echo "warning: $guest replaces the SDK's" $clash >&2
+    mkdir -p "$work/sdk/lib"
+    for file in "$sdk"/*; do [[ $file == */libzkvm.a ]] || ln -s "$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" "$work/sdk/"; done
+    localize=()
+    while read -r symbol; do localize+=("--localize-symbol=$symbol"); done <<<"$clash"
+    sdk_members=()
+    while IFS= read -r member; do sdk_members+=("$member"); done < <("$LLVM_BIN/llvm-ar" t "$sdk/libzkvm.a")
+    (cd "$work/sdk/lib" && "$LLVM_BIN/llvm-ar" x "$(cd "$sdk" && pwd)/libzkvm.a")
+    for i in "${!sdk_members[@]}"; do
+        member=$work/sdk/lib/${sdk_members[$i]}
+        if "$LLVM_BIN/llvm-objcopy" --dump-section .llvm.lto="$member.bc" "$member" 2>/dev/null; then
+            public=$("$LLVM_BIN/llvm-nm" --defined-only --extern-only "$member.bc" | awk '{print $NF}' |
+                grep -vxF -f <(echo "$clash") | paste -sd, -)
+            "$LLVM_BIN/opt" "$member.bc" -o "$member.bc" -passes=internalize -internalize-public-api-list="$public"
+            sdk_members[$i]=${sdk_members[$i]}.bc
+        else
+            "$LLVM_BIN/llvm-objcopy" "${localize[@]}" "$member"
+        fi
+    done
+    (cd "$work/sdk/lib" && "$LLVM_BIN/llvm-ar" rcs ../libzkvm.a "${sdk_members[@]}")
+    sdk=$work/sdk
+fi
 
 # The guest is built for plain RV64IM. The ISA extensions this zkVM supports (`zkvm.features`) are
 # added to the guest's code here, so one guest object serves every zkVM. They go into each
@@ -63,7 +90,7 @@ if [[ -s $sdk/zkvm.features ]]; then
     while IFS= read -r member; do members+=("$member"); done < <("$LLVM_BIN/llvm-ar" t "$guest")
     (cd "$work" && "$LLVM_BIN/llvm-ar" x "$guest")
     for member in "${members[@]}"; do
-        [[ $(head -c 4 "$work/$member" | xxd -p) == 4243c0de ]] || continue
+        is_bitcode "$work/$member" || continue
         "$LLVM_BIN/llvm-dis" "$work/$member" -o - |
             sed -E -e "s/\"target-features\"=\"\"/\"target-features\"=\"$features\"/g" \
                 -e "s/(\"target-features\"=\"[^\"]+)\"/\1,$features\"/g" |
